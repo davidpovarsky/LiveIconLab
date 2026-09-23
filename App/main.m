@@ -1,260 +1,104 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
 
 static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
-static NSString * const LiveIconLabStatusNotification = @"LiveIconLabStatusNotification";
-static BOOL LiveIconLabSuppressIconAlerts = NO;
-
-@interface UIViewController (LiveIconLabAlertSuppression)
-- (void)liveiconlab_presentViewController:(UIViewController *)viewController
-                                 animated:(BOOL)animated
-                               completion:(void (^)(void))completion;
-@end
-
-@implementation UIViewController (LiveIconLabAlertSuppression)
-
-- (void)liveiconlab_presentViewController:(UIViewController *)viewController
-                                 animated:(BOOL)animated
-                               completion:(void (^)(void))completion {
-    if (LiveIconLabSuppressIconAlerts &&
-        [viewController isKindOfClass:[UIAlertController class]]) {
-        NSLog(@"[LiveIconLab] Suppressed UIAlertController during icon animation: %@",
-              viewController);
-        if (completion) {
-            completion();
-        }
-        return;
-    }
-
-    [self liveiconlab_presentViewController:viewController
-                                   animated:animated
-                                 completion:completion];
-}
-
-@end
-
-static void LiveIconLabInstallAlertSuppressionHook(void) {
-    Class cls = [UIViewController class];
-    SEL originalSelector = @selector(presentViewController:animated:completion:);
-    SEL replacementSelector = @selector(liveiconlab_presentViewController:animated:completion:);
-
-    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
-    Method replacementMethod = class_getInstanceMethod(cls, replacementSelector);
-
-    if (originalMethod && replacementMethod) {
-        method_exchangeImplementations(originalMethod, replacementMethod);
-        NSLog(@"[LiveIconLab] Installed scoped UIAlertController suppression hook");
-    }
-}
-
-@interface LiveIconAnimator : NSObject
-@property (nonatomic, strong) id applicationProxy;
-@property (nonatomic, strong) NSTimer *timer;
-@property (nonatomic) NSInteger frame;
-@property (nonatomic) NSInteger ticksRemaining;
-@property (nonatomic) UIBackgroundTaskIdentifier backgroundTask;
-@property (nonatomic, weak) UIApplication *application;
-- (BOOL)isPrivateAPIAvailable;
-- (void)startWithApplication:(UIApplication *)application;
-- (void)resetToPrimaryIcon;
-@end
-
-@implementation LiveIconAnimator
-
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        self.backgroundTask = UIBackgroundTaskInvalid;
-
-        dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices",
-               RTLD_NOW | RTLD_LOCAL);
-
-        Class bundleProxyClass = NSClassFromString(@"LSBundleProxy");
-        SEL currentProcessSelector = NSSelectorFromString(@"bundleProxyForCurrentProcess");
-
-        if (bundleProxyClass != Nil &&
-            [bundleProxyClass respondsToSelector:currentProcessSelector]) {
-            self.applicationProxy =
-                ((id (*)(id, SEL))objc_msgSend)(bundleProxyClass, currentProcessSelector);
-        }
-    }
-    return self;
-}
-
-- (BOOL)isPrivateAPIAvailable {
-    SEL selector = NSSelectorFromString(@"setAlternateIconName:withResult:");
-    return self.applicationProxy != nil &&
-           [self.applicationProxy respondsToSelector:selector];
-}
-
-- (void)postStatus:(NSString *)message {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter]
-            postNotificationName:LiveIconLabStatusNotification
-                          object:message];
-    });
-}
-
-- (void)setAlternateIconName:(NSString *)name {
-    if (![self isPrivateAPIAvailable]) {
-        [self postStatus:@"Private LaunchServices API is not available on this build."];
-        return;
-    }
-
-    SEL selector = NSSelectorFromString(@"setAlternateIconName:withResult:");
-
-    void (^completion)(BOOL, NSError *) = ^(BOOL success, NSError *error) {
-        if (!success || error != nil) {
-            NSString *message = [NSString stringWithFormat:
-                @"Icon update failed: %@",
-                error.localizedDescription ?: @"unknown error"];
-            [self postStatus:message];
-        }
-    };
-
-    ((void (*)(id, SEL, NSString *, void (^)(BOOL, NSError *)))objc_msgSend)(
-        self.applicationProxy,
-        selector,
-        name,
-        completion
-    );
-}
-
-- (void)finish {
-    LiveIconLabSuppressIconAlerts = NO;
-
-    [self.timer invalidate];
-    self.timer = nil;
-
-    if (self.backgroundTask != UIBackgroundTaskInvalid) {
-        [self.application endBackgroundTask:self.backgroundTask];
-        self.backgroundTask = UIBackgroundTaskInvalid;
-    }
-
-    [self postStatus:@"Animation test finished. Tap Arm and go Home to run it again."];
-}
-
-- (void)tick:(NSTimer *)timer {
-    (void)timer;
-
-    NSString *iconName = [NSString stringWithFormat:@"ClockFrame%02ld",
-                          (long)self.frame];
-    [self setAlternateIconName:iconName];
-
-    self.frame = (self.frame + 1) % 12;
-    self.ticksRemaining -= 1;
-
-    if (self.ticksRemaining <= 0) {
-        [self finish];
-    }
-}
-
-- (void)startWithApplication:(UIApplication *)application {
-    if (![self isPrivateAPIAvailable]) {
-        [self postStatus:@"Cannot start: LSApplicationProxy alternate-icon API was not found."];
-        return;
-    }
-
-    [self.timer invalidate];
-    self.timer = nil;
-
-    self.application = application;
-    self.frame = 0;
-    self.ticksRemaining = 72; // 12 seconds at 6 fps.
-    LiveIconLabSuppressIconAlerts = YES;
-
-    __weak typeof(self) weakSelf = self;
-    self.backgroundTask =
-        [application beginBackgroundTaskWithName:@"LiveIconAnimationProbe"
-                               expirationHandler:^{
-        [weakSelf finish];
-    }];
-
-    [self postStatus:@"Running 12-frame private icon animation at 6 fps..."];
-
-    self.timer = [NSTimer timerWithTimeInterval:(1.0 / 6.0)
-                                         target:self
-                                       selector:@selector(tick:)
-                                       userInfo:nil
-                                        repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
-
-    // Show frame zero immediately instead of waiting for the first timer tick.
-    [self tick:self.timer];
-}
-
-- (void)resetToPrimaryIcon {
-    LiveIconLabSuppressIconAlerts = YES;
-
-    [self.timer invalidate];
-    self.timer = nil;
-    [self setAlternateIconName:nil];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        LiveIconLabSuppressIconAlerts = NO;
-    });
-
-    [self postStatus:@"Requested primary icon."];
-}
-
-@end
 
 @interface LiveIconLabAppDelegate : UIResponder <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow *window;
-@property (nonatomic, strong) LiveIconAnimator *animator;
-@property (nonatomic) BOOL animationArmed;
-- (void)armAnimation;
-- (void)resetIcon;
 @end
 
 @interface LiveIconLabViewController : UIViewController
 @property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic) NSInteger nextFrame;
 @end
 
 @implementation LiveIconLabViewController
 
-- (LiveIconLabAppDelegate *)appDelegate {
-    return (LiveIconLabAppDelegate *)UIApplication.sharedApplication.delegate;
+- (void)setStatus:(NSString *)status {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.statusLabel.text = status;
+    });
 }
 
-- (void)statusChanged:(NSNotification *)notification {
-    if ([notification.object isKindOfClass:[NSString class]]) {
-        self.statusLabel.text = notification.object;
+- (BOOL)privateNoAlertSelectorAvailable {
+    SEL selector = NSSelectorFromString(@"_setAlternateIconName:completionHandler:");
+    return [UIApplication.sharedApplication respondsToSelector:selector];
+}
+
+- (void)testNoAlertPath {
+    SEL selector = NSSelectorFromString(@"_setAlternateIconName:completionHandler:");
+    UIApplication *application = UIApplication.sharedApplication;
+
+    if (![application respondsToSelector:selector]) {
+        [self setStatus:@"FAILED: _setAlternateIconName:completionHandler: is not present on this iPadOS build."];
+        return;
     }
+
+    NSString *iconName = [NSString stringWithFormat:@"ClockFrame%02ld", (long)self.nextFrame];
+    self.nextFrame = (self.nextFrame + 1) % 12;
+
+    [self setStatus:[NSString stringWithFormat:
+        @"Calling private UIKit path once: %@\nWatch whether a SYSTEM alert appears.",
+        iconName]];
+
+    IMP imp = [application methodForSelector:selector];
+    typedef void (*SetAlternateIconIMP)(id, SEL, NSString *, void (^)(NSError *));
+    SetAlternateIconIMP function = (SetAlternateIconIMP)imp;
+
+    function(application, selector, iconName, ^(NSError *error) {
+        if (error) {
+            [self setStatus:[NSString stringWithFormat:
+                @"Private UIKit call returned error:\n%@",
+                error]];
+        } else {
+            [self setStatus:[NSString stringWithFormat:
+                @"SUCCESS: %@ applied through _setAlternateIconName:.\n"
+                 "Did a SYSTEM alert appear? If not, this is our no-alert route.",
+                iconName]];
+        }
+    });
 }
 
-- (void)armPressed {
-    [[self appDelegate] armAnimation];
-    self.statusLabel.text =
-        @"ARMED. Now swipe Home. The animation starts when LiveIconLab enters the background.";
+- (void)resetPrimary {
+    SEL selector = NSSelectorFromString(@"_setAlternateIconName:completionHandler:");
+    UIApplication *application = UIApplication.sharedApplication;
+
+    if (![application respondsToSelector:selector]) {
+        [self setStatus:@"Private UIKit selector unavailable; cannot reset through this test path."];
+        return;
+    }
+
+    IMP imp = [application methodForSelector:selector];
+    typedef void (*SetAlternateIconIMP)(id, SEL, NSString *, void (^)(NSError *));
+    SetAlternateIconIMP function = (SetAlternateIconIMP)imp;
+
+    function(application, selector, nil, ^(NSError *error) {
+        if (error) {
+            [self setStatus:[NSString stringWithFormat:@"Reset error: %@", error]];
+        } else {
+            [self setStatus:@"Primary icon requested through private UIKit path."];
+        }
+    });
 }
 
-- (void)resetPressed {
-    [[self appDelegate] resetIcon];
-}
-
-- (UIButton *)buttonWithTitle:(NSString *)title
-                      action:(SEL)action
-                       filled:(BOOL)filled {
+- (UIButton *)buttonWithTitle:(NSString *)title action:(SEL)action filled:(BOOL)filled {
     UIButtonConfiguration *configuration =
         filled ? [UIButtonConfiguration filledButtonConfiguration]
                : [UIButtonConfiguration borderedButtonConfiguration];
     configuration.title = title;
     configuration.cornerStyle = UIButtonConfigurationCornerStyleLarge;
 
-    UIButton *button = [UIButton buttonWithConfiguration:configuration
-                                           primaryAction:nil];
-    [button addTarget:self
-               action:action
-     forControlEvents:UIControlEventTouchUpInside];
+    UIButton *button = [UIButton buttonWithConfiguration:configuration primaryAction:nil];
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    self.nextFrame = 1;
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
     UILabel *title = [[UILabel alloc] init];
@@ -264,10 +108,10 @@ static void LiveIconLabInstallAlertSuppressionHook(void) {
 
     UILabel *detail = [[UILabel alloc] init];
     detail.text = [NSString stringWithFormat:
-        @"iPadOS 27 private icon-animation probe\nBundle ID: %@\n\n"
-         "This test does not use the SpringBoard dylib. It asks LaunchServices "
-         "to switch among 12 bundled clock frames while the app has short "
-         "background execution time.",
+        @"iPadOS 27 no-alert icon probe\nBundle ID: %@\n\n"
+         "This build performs ONE icon change per tap using UIKit's private "
+         "_setAlternateIconName:completionHandler: selector. It does not use "
+         "LSApplicationProxy directly and does not animate automatically.",
          LiveIconLabBundleID];
     detail.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
     detail.numberOfLines = 0;
@@ -278,27 +122,23 @@ static void LiveIconLabInstallAlertSuppressionHook(void) {
     self.statusLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
     self.statusLabel.numberOfLines = 0;
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.text = [self privateNoAlertSelectorAvailable]
+        ? @"Private UIKit selector FOUND. Ready for one controlled test."
+        : @"Private UIKit selector NOT FOUND on this build.";
 
-    LiveIconAnimator *animator = [self appDelegate].animator;
-    self.statusLabel.text = animator.isPrivateAPIAvailable
-        ? @"Private LSApplicationProxy API found. Ready."
-        : @"Private LSApplicationProxy API was not found on this build.";
+    UIButton *test = [self buttonWithTitle:@"Test one no-alert icon change"
+                                    action:@selector(testNoAlertPath)
+                                    filled:YES];
+    UIButton *reset = [self buttonWithTitle:@"Reset to primary icon"
+                                     action:@selector(resetPrimary)
+                                     filled:NO];
 
-    UIButton *armButton = [self buttonWithTitle:@"Arm animation test"
-                                         action:@selector(armPressed)
-                                         filled:YES];
-    UIButton *resetButton = [self buttonWithTitle:@"Reset to primary icon"
-                                           action:@selector(resetPressed)
-                                           filled:NO];
-
-    UIStackView *buttons =
-        [[UIStackView alloc] initWithArrangedSubviews:@[armButton, resetButton]];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[test, reset]];
     buttons.axis = UILayoutConstraintAxisVertical;
     buttons.spacing = 12.0;
 
     UIStackView *stack =
-        [[UIStackView alloc] initWithArrangedSubviews:
-            @[title, detail, self.statusLabel, buttons]];
+        [[UIStackView alloc] initWithArrangedSubviews:@[title, detail, self.statusLabel, buttons]];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 24.0;
@@ -306,25 +146,13 @@ static void LiveIconLabInstallAlertSuppressionHook(void) {
 
     [self.view addSubview:stack];
 
-    [[NSNotificationCenter defaultCenter]
-        addObserver:self
-           selector:@selector(statusChanged:)
-               name:LiveIconLabStatusNotification
-             object:nil];
-
     [NSLayoutConstraint activateConstraints:@[
         [stack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor
-                                                         constant:40.0],
-        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor
-                                                        constant:-40.0],
-        [stack.widthAnchor constraintLessThanOrEqualToConstant:680.0]
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:40.0],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-40.0],
+        [stack.widthAnchor constraintLessThanOrEqualToConstant:720.0]
     ]];
-}
-
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 @end
@@ -336,40 +164,16 @@ static void LiveIconLabInstallAlertSuppressionHook(void) {
     (void)application;
     (void)launchOptions;
 
-    self.animator = [[LiveIconAnimator alloc] init];
-    self.animationArmed = NO;
-
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    LiveIconLabViewController *controller = [[LiveIconLabViewController alloc] init];
-    self.window.rootViewController = controller;
+    self.window.rootViewController = [[LiveIconLabViewController alloc] init];
     [self.window makeKeyAndVisible];
     return YES;
-}
-
-- (void)armAnimation {
-    self.animationArmed = YES;
-}
-
-- (void)resetIcon {
-    self.animationArmed = NO;
-    [self.animator resetToPrimaryIcon];
-}
-
-- (void)applicationDidEnterBackground:(UIApplication *)application {
-    if (self.animationArmed) {
-        self.animationArmed = NO;
-        [self.animator startWithApplication:application];
-    }
 }
 
 @end
 
 int main(int argc, char * argv[]) {
     @autoreleasepool {
-        LiveIconLabInstallAlertSuppressionHook();
-        return UIApplicationMain(argc,
-                                 argv,
-                                 nil,
-                                 NSStringFromClass([LiveIconLabAppDelegate class]));
+        return UIApplicationMain(argc, argv, nil, NSStringFromClass([LiveIconLabAppDelegate class]));
     }
 }
