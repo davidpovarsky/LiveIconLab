@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD="$ROOT/build"
+PAYLOAD="$BUILD/Payload"
+APP="$PAYLOAD/LiveIconLab.app"
+IPA="$BUILD/LiveIconLab-unsigned.ipa"
+HOOK="$BUILD/LiveIconHook.dylib"
+
+rm -rf "$BUILD"
+mkdir -p "$APP"
+
+SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+CLANG="$(xcrun --sdk iphoneos --find clang)"
+CLANGXX="$(xcrun --sdk iphoneos --find clang++)"
+
+TARGET="arm64-apple-ios17.0"
+
+echo "SDK: $SDK"
+echo "Target: $TARGET"
+
+"$CLANG"   -fobjc-arc   -target "$TARGET"   -isysroot "$SDK"   -framework Foundation   -framework UIKit   "$ROOT/App/main.m"   -o "$APP/LiveIconLab"
+
+cp "$ROOT/App/Info.plist" "$APP/Info.plist"
+plutil -convert binary1 "$APP/Info.plist"
+
+"$CLANGXX"   -fobjc-arc   -target "$TARGET"   -isysroot "$SDK"   -dynamiclib   -framework Foundation   "$ROOT/SpringBoard/LiveIconHook.mm"   -Wl,-install_name,@rpath/LiveIconHook.dylib   -o "$HOOK"
+
+(
+  cd "$BUILD"
+  /usr/bin/zip -qry "$(basename "$IPA")" Payload
+)
+
+{
+  echo "LiveIconLab build"
+  echo "Bundle ID: com.goldcreative.liveiconlab"
+  echo "Runtime target: iPadOS 27"
+  echo "Mach-O target: $TARGET"
+  echo "SDK: $SDK"
+  echo
+  echo "App binary:"
+  file "$APP/LiveIconLab"
+  echo
+  echo "Hook binary:"
+  file "$HOOK"
+  echo
+  echo "IPA:"
+  ls -lh "$IPA"
+} | tee "$BUILD/build-manifest.txt"
+
+echo
+echo "Built:"
+echo "  $IPA"
+echo "  $HOOK"
