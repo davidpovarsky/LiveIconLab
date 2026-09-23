@@ -1,11 +1,17 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dlfcn.h>
 
 int main(int argc, char **argv) {
     @autoreleasepool {
+        (void)argc;
+        (void)argv;
+
         const char *path =
             "/System/Library/PrivateFrameworks/SpringBoardHome.framework/SpringBoardHome";
+
         dlerror();
         void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         const char *err = dlerror();
@@ -31,14 +37,27 @@ int main(int argc, char **argv) {
 
         Class clock = objc_getClass("SBHClockApplicationIconImageView");
         Class icon = objc_getClass("SBIcon");
+
         if (!clock || !icon) {
             return 3;
         }
 
-        id view = [[clock alloc] initWithFrame:CGRectMake(0, 0, 180, 180)];
-        id iconObject = [[icon alloc] init];
+        id allocatedView =
+            ((id (*)(id, SEL))objc_msgSend)(clock, @selector(alloc));
+        id view =
+            ((id (*)(id, SEL, CGRect))objc_msgSend)(
+                allocatedView,
+                NSSelectorFromString(@"initWithFrame:"),
+                CGRectMake(0, 0, 180, 180));
+
+        id allocatedIcon =
+            ((id (*)(id, SEL))objc_msgSend)(icon, @selector(alloc));
+        id iconObject =
+            ((id (*)(id, SEL))objc_msgSend)(allocatedIcon, @selector(init));
+
         printf("SIM_PROBE clock_instance=%s\n", view ? "SUCCESS" : "FAILED");
         printf("SIM_PROBE icon_instance=%s\n", iconObject ? "SUCCESS" : "FAILED");
+
         return (view && iconObject) ? 0 : 4;
     }
 }
