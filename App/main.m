@@ -1,6 +1,5 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
-#import <objc/runtime.h>
 #import <dlfcn.h>
 
 static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
@@ -22,65 +21,125 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
     });
 }
 
-- (BOOL)privateNoAlertSelectorAvailable {
-    SEL selector = NSSelectorFromString(@"_setAlternateIconName:completionHandler:");
-    return [UIApplication.sharedApplication respondsToSelector:selector];
+- (NSDictionary *)ipadIconsDictionary {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    NSDictionary *icons = info[@"CFBundleIcons~ipad"];
+    return [icons isKindOfClass:[NSDictionary class]] ? icons : nil;
 }
 
-- (void)testNoAlertPath {
-    SEL selector = NSSelectorFromString(@"_setAlternateIconName:completionHandler:");
-    UIApplication *application = UIApplication.sharedApplication;
+- (id)iconServiceProxyWithErrorHandler:(void (^)(NSError *error))errorHandler {
+    dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices",
+           RTLD_NOW | RTLD_LOCAL);
 
-    if (![application respondsToSelector:selector]) {
-        [self setStatus:@"FAILED: _setAlternateIconName:completionHandler: is not present on this iPadOS build."];
+    Class serviceClass = NSClassFromString(@"_LSDIconService");
+    SEL proxySelector = NSSelectorFromString(@"XPCProxyWithErrorHandler:");
+
+    if (serviceClass == Nil || ![serviceClass respondsToSelector:proxySelector]) {
+        return nil;
+    }
+
+    return ((id (*)(id, SEL, id))objc_msgSend)(
+        serviceClass,
+        proxySelector,
+        errorHandler
+    );
+}
+
+- (void)testDirectLSDPath {
+    NSDictionary *iconsDictionary = [self ipadIconsDictionary];
+    if (!iconsDictionary) {
+        [self setStatus:@"FAILED: CFBundleIcons~ipad dictionary missing."];
         return;
     }
 
-    NSString *iconName = [NSString stringWithFormat:@"ClockFrame%02ld", (long)self.nextFrame];
+    NSString *iconName = [NSString stringWithFormat:@"ClockFrame%02ld",
+                          (long)self.nextFrame];
     self.nextFrame = (self.nextFrame + 1) % 12;
 
-    [self setStatus:[NSString stringWithFormat:
-        @"Calling private UIKit path once: %@\nWatch whether a SYSTEM alert appears.",
-        iconName]];
+    __weak typeof(self) weakSelf = self;
+    id proxy = [self iconServiceProxyWithErrorHandler:^(NSError *error) {
+        [weakSelf setStatus:[NSString stringWithFormat:
+            @"XPC proxy error:\n%@",
+            error ?: @"unknown error"]];
+    }];
 
-    IMP imp = [application methodForSelector:selector];
-    typedef void (*SetAlternateIconIMP)(id, SEL, NSString *, void (^)(NSError *));
-    SetAlternateIconIMP function = (SetAlternateIconIMP)imp;
-
-    function(application, selector, iconName, ^(NSError *error) {
-        if (error) {
-            [self setStatus:[NSString stringWithFormat:
-                @"Private UIKit call returned error:\n%@",
-                error]];
-        } else {
-            [self setStatus:[NSString stringWithFormat:
-                @"SUCCESS: %@ applied through _setAlternateIconName:.\n"
-                 "Did a SYSTEM alert appear? If not, this is our no-alert route.",
-                iconName]];
-        }
-    });
-}
-
-- (void)resetPrimary {
-    SEL selector = NSSelectorFromString(@"_setAlternateIconName:completionHandler:");
-    UIApplication *application = UIApplication.sharedApplication;
-
-    if (![application respondsToSelector:selector]) {
-        [self setStatus:@"Private UIKit selector unavailable; cannot reset through this test path."];
+    if (!proxy) {
+        [self setStatus:@"FAILED: _LSDIconService XPC proxy unavailable."];
         return;
     }
 
-    IMP imp = [application methodForSelector:selector];
-    typedef void (*SetAlternateIconIMP)(id, SEL, NSString *, void (^)(NSError *));
-    SetAlternateIconIMP function = (SetAlternateIconIMP)imp;
+    SEL selector =
+        NSSelectorFromString(@"setAlternateIconName:forIdentifier:iconsDictionary:reply:");
 
-    function(application, selector, nil, ^(NSError *error) {
-        if (error) {
-            [self setStatus:[NSString stringWithFormat:@"Reset error: %@", error]];
+    if (![proxy respondsToSelector:selector]) {
+        [self setStatus:@"FAILED: direct LSD icon selector unavailable on this build."];
+        return;
+    }
+
+    [self setStatus:[NSString stringWithFormat:
+        @"Calling direct _LSDIconService once: %@\n"
+         "This bypasses UIApplication/LSApplicationProxy. Watch for a SYSTEM alert.",
+        iconName]];
+
+    void (^reply)(BOOL, NSError *) = ^(BOOL success, NSError *error) {
+        if (!success || error) {
+            [weakSelf setStatus:[NSString stringWithFormat:
+                @"Direct LSD call failed.\nSuccess: %@\nError: %@",
+                success ? @"YES" : @"NO",
+                error ?: @"(none)"]];
         } else {
-            [self setStatus:@"Primary icon requested through private UIKit path."];
+            [weakSelf setStatus:[NSString stringWithFormat:
+                @"SUCCESS: %@ changed via direct LSD service.\n"
+                 "If no SYSTEM alert appeared, we found the real no-alert path.",
+                iconName]];
         }
-    });
+    };
+
+    ((void (*)(id, SEL, NSString *, NSString *, NSDictionary *, id))objc_msgSend)(
+        proxy,
+        selector,
+        iconName,
+        LiveIconLabBundleID,
+        iconsDictionary,
+        reply
+    );
+}
+
+- (void)resetDirectLSDPath {
+    NSDictionary *iconsDictionary = [self ipadIconsDictionary];
+    if (!iconsDictionary) {
+        [self setStatus:@"FAILED: CFBundleIcons~ipad dictionary missing."];
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    id proxy = [self iconServiceProxyWithErrorHandler:^(NSError *error) {
+        [weakSelf setStatus:[NSString stringWithFormat:@"XPC proxy error: %@", error]];
+    }];
+
+    SEL selector =
+        NSSelectorFromString(@"setAlternateIconName:forIdentifier:iconsDictionary:reply:");
+
+    if (!proxy || ![proxy respondsToSelector:selector]) {
+        [self setStatus:@"Direct LSD path unavailable."];
+        return;
+    }
+
+    void (^reply)(BOOL, NSError *) = ^(BOOL success, NSError *error) {
+        [weakSelf setStatus:[NSString stringWithFormat:
+            @"Reset result: %@%@",
+            success ? @"SUCCESS" : @"FAILED",
+            error ? [NSString stringWithFormat:@"\n%@", error] : @""]];
+    };
+
+    ((void (*)(id, SEL, NSString *, NSString *, NSDictionary *, id))objc_msgSend)(
+        proxy,
+        selector,
+        nil,
+        LiveIconLabBundleID,
+        iconsDictionary,
+        reply
+    );
 }
 
 - (UIButton *)buttonWithTitle:(NSString *)title action:(SEL)action filled:(BOOL)filled {
@@ -98,8 +157,8 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.nextFrame = 1;
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.nextFrame = 2;
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
 
     UILabel *title = [[UILabel alloc] init];
     title.text = @"LiveIconLab";
@@ -108,50 +167,58 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
 
     UILabel *detail = [[UILabel alloc] init];
     detail.text = [NSString stringWithFormat:
-        @"iPadOS 27 no-alert icon probe\nBundle ID: %@\n\n"
-         "This build performs ONE icon change per tap using UIKit's private "
-         "_setAlternateIconName:completionHandler: selector. It does not use "
-         "LSApplicationProxy directly and does not animate automatically.",
+        @"iPadOS 27 direct LaunchServices XPC probe\nBundle ID: %@\n\n"
+         "This build does NOT call UIApplication.setAlternateIconName and does NOT "
+         "call LSApplicationProxy. It talks directly to _LSDIconService using the "
+         "generic setAlternateIconName:forIdentifier:iconsDictionary:reply: route.",
          LiveIconLabBundleID];
-    detail.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
+    detail.font = [UIFont systemFontOfSize:17.0];
     detail.numberOfLines = 0;
     detail.textAlignment = NSTextAlignmentCenter;
-    detail.textColor = [UIColor secondaryLabelColor];
+    detail.textColor = UIColor.secondaryLabelColor;
 
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
     self.statusLabel.numberOfLines = 0;
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusLabel.text = [self privateNoAlertSelectorAvailable]
-        ? @"Private UIKit selector FOUND. Ready for one controlled test."
-        : @"Private UIKit selector NOT FOUND on this build.";
 
-    UIButton *test = [self buttonWithTitle:@"Test one no-alert icon change"
-                                    action:@selector(testNoAlertPath)
+    dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices",
+           RTLD_NOW | RTLD_LOCAL);
+    Class serviceClass = NSClassFromString(@"_LSDIconService");
+    SEL proxySelector = NSSelectorFromString(@"XPCProxyWithErrorHandler:");
+    self.statusLabel.text =
+        (serviceClass && [serviceClass respondsToSelector:proxySelector])
+        ? @"_LSDIconService FOUND. Ready for one direct XPC test."
+        : @"_LSDIconService direct proxy route NOT FOUND.";
+
+    UIButton *test = [self buttonWithTitle:@"Test direct no-alert LSD change"
+                                    action:@selector(testDirectLSDPath)
                                     filled:YES];
-    UIButton *reset = [self buttonWithTitle:@"Reset to primary icon"
-                                     action:@selector(resetPrimary)
+
+    UIButton *reset = [self buttonWithTitle:@"Reset through direct LSD"
+                                     action:@selector(resetDirectLSDPath)
                                      filled:NO];
 
-    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[test, reset]];
+    UIStackView *buttons =
+        [[UIStackView alloc] initWithArrangedSubviews:@[test, reset]];
     buttons.axis = UILayoutConstraintAxisVertical;
     buttons.spacing = 12.0;
 
     UIStackView *stack =
-        [[UIStackView alloc] initWithArrangedSubviews:@[title, detail, self.statusLabel, buttons]];
+        [[UIStackView alloc] initWithArrangedSubviews:
+            @[title, detail, self.statusLabel, buttons]];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 24.0;
-    stack.alignment = UIStackViewAlignmentFill;
 
     [self.view addSubview:stack];
 
     [NSLayoutConstraint activateConstraints:@[
         [stack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:40.0],
-        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-40.0],
-        [stack.widthAnchor constraintLessThanOrEqualToConstant:720.0]
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:40],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-40],
+        [stack.widthAnchor constraintLessThanOrEqualToConstant:760]
     ]];
 }
 
@@ -164,7 +231,7 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
     (void)application;
     (void)launchOptions;
 
-    self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [[LiveIconLabViewController alloc] init];
     [self.window makeKeyAndVisible];
     return YES;
@@ -174,6 +241,7 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
 
 int main(int argc, char * argv[]) {
     @autoreleasepool {
-        return UIApplicationMain(argc, argv, nil, NSStringFromClass([LiveIconLabAppDelegate class]));
+        return UIApplicationMain(argc, argv, nil,
+                                 NSStringFromClass([LiveIconLabAppDelegate class]));
     }
 }
