@@ -35,3 +35,59 @@ jobs:
             build/LiveIconHook.dylib
             build/build-manifest.txt
           if-no-files-found: error
+
+
+  simulator-probe:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show available simulator runtimes
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+          xcrun simctl list devices available
+
+      - name: Build SimulatorProbe
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          mkdir -p build/SimulatorProbe.app
+          xcrun --sdk iphonesimulator clang \
+            -fobjc-arc \
+            -fmodules \
+            -isysroot "$SDK" \
+            -mios-simulator-version-min=17.0 \
+            -framework Foundation \
+            -framework UIKit \
+            SimulatorProbe/main.m \
+            -o build/SimulatorProbe.app/SimulatorProbe
+          cp SimulatorProbe/Info.plist build/SimulatorProbe.app/Info.plist
+
+      - name: Boot simulator and run private-framework probe
+        run: |
+          set -euxo pipefail
+          DEVICE="$(xcrun simctl list devices available | sed -n 's/^[[:space:]]*iPad[^()]*(\([^)]*\)).*/\1/p' | head -1)"
+          if [ -z "$DEVICE" ]; then
+            DEVICE="$(xcrun simctl list devices available | sed -n 's/^[[:space:]]*iPhone[^()]*(\([^)]*\)).*/\1/p' | head -1)"
+          fi
+          test -n "$DEVICE"
+          xcrun simctl boot "$DEVICE" || true
+          open -a Simulator --args -CurrentDeviceUDID "$DEVICE"
+          xcrun simctl bootstatus "$DEVICE" -b
+          xcrun simctl install "$DEVICE" build/SimulatorProbe.app
+          set +e
+          xcrun simctl launch --console-pty "$DEVICE" com.goldcreative.liveiconlab.simprobe 2>&1 | tee build/simulator-probe.log
+          STATUS="${PIPESTATUS[0]}"
+          set -e
+          cat build/simulator-probe.log
+          exit "$STATUS"
+
+      - name: Upload simulator probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveIconLab-SimulatorProbe
+          path: build/simulator-probe.log
+          if-no-files-found: ignore
