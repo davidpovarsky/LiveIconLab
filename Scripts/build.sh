@@ -20,12 +20,42 @@ TARGET="arm64-apple-ios17.0"
 echo "SDK: $SDK"
 echo "Target: $TARGET"
 
-"$CLANG"   -fobjc-arc   -target "$TARGET"   -isysroot "$SDK"   -framework Foundation   -framework UIKit   "$ROOT/App/main.m"   -o "$APP/LiveIconLab"
+"$CLANG" \
+  -fobjc-arc \
+  -target "$TARGET" \
+  -isysroot "$SDK" \
+  -framework Foundation \
+  -framework UIKit \
+  "$ROOT/App/main.m" \
+  -o "$APP/LiveIconLab"
 
 cp "$ROOT/App/Info.plist" "$APP/Info.plist"
+
+python3 "$ROOT/Scripts/generate_icons.py" "$APP"
+
+for icon in \
+  Icon-20@2x.png \
+  Icon-29@2x.png \
+  Icon-40@2x.png \
+  Icon-76.png \
+  Icon-76@2x.png \
+  Icon-83.5@2x.png \
+  Icon-1024.png
+do
+  test -s "$APP/$icon"
+done
+
 plutil -convert binary1 "$APP/Info.plist"
 
-"$CLANGXX"   -fobjc-arc   -target "$TARGET"   -isysroot "$SDK"   -dynamiclib   -framework Foundation   "$ROOT/SpringBoard/LiveIconHook.mm"   -Wl,-install_name,@rpath/LiveIconHook.dylib   -o "$HOOK"
+"$CLANGXX" \
+  -fobjc-arc \
+  -target "$TARGET" \
+  -isysroot "$SDK" \
+  -dynamiclib \
+  -framework Foundation \
+  "$ROOT/SpringBoard/LiveIconHook.mm" \
+  -Wl,-install_name,@rpath/LiveIconHook.dylib \
+  -o "$HOOK"
 
 (
   cd "$BUILD"
@@ -41,6 +71,9 @@ plutil -convert binary1 "$APP/Info.plist"
   echo
   echo "App binary:"
   file "$APP/LiveIconLab"
+  echo
+  echo "Bundled icons:"
+  ls -lh "$APP"/Icon*.png
   echo
   echo "Hook binary:"
   file "$HOOK"
