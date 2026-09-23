@@ -3,6 +3,12 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
+typedef struct {
+    CGSize size;
+    double scale;
+    double continuousCornerRadius;
+} LiveIconLabSBIconImageInfo;
+
 static NSString * const SpringBoardHomePath =
     @"/System/Library/PrivateFrameworks/SpringBoardHome.framework/SpringBoardHome";
 
@@ -13,6 +19,8 @@ static NSString * const SpringBoardHomePath =
 @interface LiveIconLabViewController : UIViewController
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIView *previewHost;
+@property (nonatomic, strong) UIView *clockView;
+@property (nonatomic, strong) id clockIcon;
 @end
 
 @implementation LiveIconLabViewController
@@ -27,6 +35,19 @@ static NSString * const SpringBoardHomePath =
     return value ? @"YES" : @"NO";
 }
 
+- (NSString *)resolvedRootLocationForHandle:(void *)handle {
+    void *symbol = dlsym(handle, "SBIconLocationRoot");
+    if (symbol) {
+        NSString * __unsafe_unretained *value = (NSString * __unsafe_unretained *)symbol;
+        if (*value) {
+            return *value;
+        }
+    }
+
+    // Fallback used only if the exported constant cannot be resolved.
+    return @"SBIconLocationRoot";
+}
+
 - (void)runRuntimeProbe {
     NSMutableArray<NSString *> *lines = [NSMutableArray array];
 
@@ -35,138 +56,145 @@ static NSString * const SpringBoardHomePath =
     const char *error = dlerror();
 
     [lines addObject:[NSString stringWithFormat:
-        @"dlopen SpringBoardHome: %@",
-        handle ? @"SUCCESS" : @"FAILED"]];
+        @"dlopen SpringBoardHome: %@", handle ? @"SUCCESS" : @"FAILED"]];
 
     if (!handle) {
-        [lines addObject:[NSString stringWithFormat:
-            @"dlerror: %s",
-            error ?: "(none)"]];
+        [lines addObject:[NSString stringWithFormat:@"dlerror: %s", error ?: "(none)"]];
         [self setStatus:[lines componentsJoinedByString:@"\n"]];
         return;
     }
 
-    NSArray<NSString *> *names = @[
-        @"SBLiveIconImageView",
-        @"SBHClockApplicationIconImageView",
-        @"SBHClockApplicationIcon",
-        @"SBHApplicationIcon",
-        @"SBHIconModel"
-    ];
+    Class liveBaseClass = NSClassFromString(@"SBLiveIconImageView");
+    Class clockViewClass = NSClassFromString(@"SBHClockApplicationIconImageView");
+    Class iconClass = NSClassFromString(@"SBIcon");
 
-    NSMutableDictionary<NSString *, id> *classes = [NSMutableDictionary dictionary];
+    [lines addObject:[NSString stringWithFormat:@"SBLiveIconImageView: %@",
+                      liveBaseClass ? @"FOUND" : @"NOT FOUND"]];
+    [lines addObject:[NSString stringWithFormat:@"SBHClockApplicationIconImageView: %@",
+                      clockViewClass ? @"FOUND" : @"NOT FOUND"]];
+    [lines addObject:[NSString stringWithFormat:@"SBIcon: %@",
+                      iconClass ? @"FOUND" : @"NOT FOUND"]];
 
-    for (NSString *name in names) {
-        Class cls = NSClassFromString(name);
-        if (cls) {
-            classes[name] = cls;
-        }
-        [lines addObject:[NSString stringWithFormat:
-            @"%@: %@",
-            name,
-            cls ? @"FOUND" : @"NOT FOUND"]];
-    }
-
-    Class clockViewClass = classes[@"SBHClockApplicationIconImageView"];
-    if (!clockViewClass) {
-        [lines addObject:@"Clock live-image class is not visible in this process."];
-        [self setStatus:[lines componentsJoinedByString:@"\n"]];
-        return;
-    }
-
-    BOOL isUIViewSubclass = [clockViewClass isSubclassOfClass:[UIView class]];
-    [lines addObject:[NSString stringWithFormat:
-        @"Clock image view is UIView subclass: %@",
-        [self yesNo:isUIViewSubclass]]];
-
-    if (!isUIViewSubclass) {
+    if (!clockViewClass || !iconClass) {
         [self setStatus:[lines componentsJoinedByString:@"\n"]];
         return;
     }
 
     @try {
+        [self.clockView removeFromSuperview];
+        self.clockView = nil;
+        self.clockIcon = nil;
+
         CGRect frame = CGRectMake(0, 0, 180, 180);
-        id instance = nil;
 
-        SEL initWithFrame = @selector(initWithFrame:);
-        if ([clockViewClass instancesRespondToSelector:initWithFrame]) {
-            id allocated = ((id (*)(id, SEL))objc_msgSend)(clockViewClass, @selector(alloc));
-            instance = ((id (*)(id, SEL, CGRect))objc_msgSend)(
-                allocated, initWithFrame, frame);
-            [lines addObject:@"initWithFrame: returned an object."];
-        } else {
-            id allocated = ((id (*)(id, SEL))objc_msgSend)(clockViewClass, @selector(alloc));
-            instance = ((id (*)(id, SEL))objc_msgSend)(allocated, @selector(init));
-            [lines addObject:@"init returned an object."];
-        }
+        id allocatedView =
+            ((id (*)(id, SEL))objc_msgSend)(clockViewClass, @selector(alloc));
+        id clockView =
+            ((id (*)(id, SEL, CGRect))objc_msgSend)(allocatedView,
+                                                    @selector(initWithFrame:),
+                                                    frame);
 
-        if (!instance) {
-            [lines addObject:@"Instantiation returned nil."];
+        id allocatedIcon =
+            ((id (*)(id, SEL))objc_msgSend)(iconClass, @selector(alloc));
+        id icon =
+            ((id (*)(id, SEL))objc_msgSend)(allocatedIcon, @selector(init));
+
+        if (!clockView || !icon) {
+            [lines addObject:@"FAILED: could not instantiate clock view or SBIcon."];
             [self setStatus:[lines componentsJoinedByString:@"\n"]];
             return;
         }
 
-        UIView *clockView = (UIView *)instance;
-        clockView.frame = frame;
-        clockView.translatesAutoresizingMaskIntoConstraints = NO;
+        [lines addObject:@"SBHClockApplicationIconImageView init: SUCCESS"];
+        [lines addObject:@"SBIcon init: SUCCESS"];
 
-        [self.previewHost.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
-        [self.previewHost addSubview:clockView];
+        self.clockView = (UIView *)clockView;
+        self.clockIcon = icon;
 
-        [NSLayoutConstraint activateConstraints:@[
-            [clockView.centerXAnchor constraintEqualToAnchor:self.previewHost.centerXAnchor],
-            [clockView.centerYAnchor constraintEqualToAnchor:self.previewHost.centerYAnchor],
-            [clockView.widthAnchor constraintEqualToConstant:180.0],
-            [clockView.heightAnchor constraintEqualToConstant:180.0]
-        ]];
+        CGFloat scale = UIScreen.mainScreen.scale;
+        LiveIconLabSBIconImageInfo info;
+        info.size = CGSizeMake(180.0, 180.0);
+        info.scale = scale;
+        info.continuousCornerRadius = 0.0;
 
-        SEL pausedSelector = NSSelectorFromString(@"setPaused:");
-        if ([clockView respondsToSelector:pausedSelector]) {
-            ((void (*)(id, SEL, BOOL))objc_msgSend)(clockView, pausedSelector, NO);
-            [lines addObject:@"setPaused:NO sent."];
+        SEL setInfo = NSSelectorFromString(@"setIconImageInfo:");
+        if ([clockView respondsToSelector:setInfo]) {
+            ((void (*)(id, SEL, LiveIconLabSBIconImageInfo))objc_msgSend)(
+                clockView, setInfo, info);
+            [lines addObject:[NSString stringWithFormat:
+                @"setIconImageInfo: 180x180 scale %.1f sent.", scale]];
         } else {
-            [lines addObject:@"setPaused: not available."];
+            [lines addObject:@"setIconImageInfo: NOT FOUND"];
         }
 
-        SEL updateSelector = NSSelectorFromString(@"updateOngoingAnimationState");
-        if ([clockView respondsToSelector:updateSelector]) {
-            ((void (*)(id, SEL))objc_msgSend)(clockView, updateSelector);
+        NSString *location = [self resolvedRootLocationForHandle:handle];
+        [lines addObject:[NSString stringWithFormat:@"location: %@", location]];
+
+        SEL setIcon = NSSelectorFromString(@"setIcon:location:animated:");
+        if ([clockView respondsToSelector:setIcon]) {
+            ((void (*)(id, SEL, id, id, BOOL))objc_msgSend)(
+                clockView, setIcon, icon, location, NO);
+            [lines addObject:@"setIcon:location:animated: sent."];
+        } else {
+            [lines addObject:@"setIcon:location:animated: NOT FOUND"];
+        }
+
+        UIView *view = (UIView *)clockView;
+        view.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.previewHost addSubview:view];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [view.centerXAnchor constraintEqualToAnchor:self.previewHost.centerXAnchor],
+            [view.centerYAnchor constraintEqualToAnchor:self.previewHost.centerYAnchor],
+            [view.widthAnchor constraintEqualToConstant:180.0],
+            [view.heightAnchor constraintEqualToConstant:180.0]
+        ]];
+
+        [view setNeedsLayout];
+        [view layoutIfNeeded];
+
+        SEL paused = NSSelectorFromString(@"setPaused:");
+        if ([clockView respondsToSelector:paused]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(clockView, paused, NO);
+            [lines addObject:@"setPaused:NO sent."];
+        }
+
+        SEL updateUnanimated = NSSelectorFromString(@"updateUnanimated");
+        if ([clockView respondsToSelector:updateUnanimated]) {
+            ((void (*)(id, SEL))objc_msgSend)(clockView, updateUnanimated);
+            [lines addObject:@"updateUnanimated sent."];
+        }
+
+        SEL updateState = NSSelectorFromString(@"updateOngoingAnimationState");
+        if ([clockView respondsToSelector:updateState]) {
+            ((void (*)(id, SEL))objc_msgSend)(clockView, updateState);
             [lines addObject:@"updateOngoingAnimationState sent."];
         }
 
-        SEL allowedSelector = NSSelectorFromString(@"areOngoingAnimationsAllowed");
-        if ([clockView respondsToSelector:allowedSelector]) {
-            BOOL allowed =
-                ((BOOL (*)(id, SEL))objc_msgSend)(clockView, allowedSelector);
+        SEL allowed = NSSelectorFromString(@"areOngoingAnimationsAllowed");
+        if ([clockView respondsToSelector:allowed]) {
+            BOOL value = ((BOOL (*)(id, SEL))objc_msgSend)(clockView, allowed);
             [lines addObject:[NSString stringWithFormat:
-                @"areOngoingAnimationsAllowed: %@",
-                [self yesNo:allowed]]];
+                @"areOngoingAnimationsAllowed: %@", [self yesNo:value]]];
         }
 
-        [lines addObject:@"Live clock image-view instance was attached below."];
+        SEL iconGetter = NSSelectorFromString(@"icon");
+        if ([clockView respondsToSelector:iconGetter]) {
+            id attached = ((id (*)(id, SEL))objc_msgSend)(clockView, iconGetter);
+            [lines addObject:[NSString stringWithFormat:
+                @"clock view icon attached: %@", attached ? @"YES" : @"NO"]];
+        }
+
+        [lines addObject:@"Apple live-clock view attached below using ClarityBoard-style setup."];
     }
     @catch (NSException *exception) {
         [lines addObject:[NSString stringWithFormat:
-            @"EXCEPTION creating live view: %@ — %@",
+            @"EXCEPTION: %@ — %@",
             exception.name,
             exception.reason ?: @"(no reason)"]];
     }
 
     [self setStatus:[lines componentsJoinedByString:@"\n"]];
-}
-
-- (UIButton *)probeButton {
-    UIButtonConfiguration *configuration =
-        [UIButtonConfiguration filledButtonConfiguration];
-    configuration.title = @"Run SpringBoardHome runtime probe";
-    configuration.cornerStyle = UIButtonConfigurationCornerStyleLarge;
-
-    UIButton *button =
-        [UIButton buttonWithConfiguration:configuration primaryAction:nil];
-    [button addTarget:self
-               action:@selector(runRuntimeProbe)
-     forControlEvents:UIControlEventTouchUpInside];
-    return button;
 }
 
 - (void)viewDidLoad {
@@ -181,11 +209,9 @@ static NSString * const SpringBoardHomePath =
 
     UILabel *detail = [[UILabel alloc] init];
     detail.text =
-        @"iPadOS 27 SpringBoardHome runtime probe\n\n"
-         "This build does not change the Home Screen icon. It tests whether a normal "
-         "third-party process can load SpringBoardHome.framework, resolve Apple's "
-         "live-clock classes, instantiate SBHClockApplicationIconImageView, and "
-         "run its animation machinery.";
+        @"Build 15 — ClarityBoard-style Apple live-clock probe\n\n"
+         "This reproduces Apple's own setup: SBHClockApplicationIconImageView + "
+         "SBIcon + iconImageInfo + setIcon:location:animated:.";
     detail.font = [UIFont systemFontOfSize:16];
     detail.numberOfLines = 0;
     detail.textAlignment = NSTextAlignmentCenter;
@@ -193,24 +219,31 @@ static NSString * const SpringBoardHomePath =
 
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.font =
-        [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
+        [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightMedium];
     self.statusLabel.numberOfLines = 0;
-    self.statusLabel.textAlignment = NSTextAlignmentLeft;
-    self.statusLabel.text = @"Ready. Tap the probe button.";
+    self.statusLabel.text = @"Ready.";
 
     self.previewHost = [[UIView alloc] init];
     self.previewHost.translatesAutoresizingMaskIntoConstraints = NO;
     self.previewHost.backgroundColor = UIColor.secondarySystemBackgroundColor;
     self.previewHost.layer.cornerRadius = 24;
 
-    UIButton *button = [self probeButton];
+    UIButtonConfiguration *configuration =
+        [UIButtonConfiguration filledButtonConfiguration];
+    configuration.title = @"Run Apple live-clock probe";
+    configuration.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+    UIButton *button =
+        [UIButton buttonWithConfiguration:configuration primaryAction:nil];
+    [button addTarget:self
+               action:@selector(runRuntimeProbe)
+     forControlEvents:UIControlEventTouchUpInside];
 
     UIStackView *stack =
         [[UIStackView alloc] initWithArrangedSubviews:
             @[title, detail, button, self.statusLabel, self.previewHost]];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 20;
+    stack.spacing = 18;
 
     [self.view addSubview:stack];
 
@@ -221,7 +254,7 @@ static NSString * const SpringBoardHomePath =
         [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
         [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:48],
         [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-48],
-        [stack.widthAnchor constraintLessThanOrEqualToConstant:760]
+        [stack.widthAnchor constraintLessThanOrEqualToConstant:780]
     ]];
 }
 
@@ -233,7 +266,6 @@ static NSString * const SpringBoardHomePath =
         didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     (void)application;
     (void)launchOptions;
-
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [[LiveIconLabViewController alloc] init];
     [self.window makeKeyAndVisible];
