@@ -19,7 +19,14 @@
     <key>CFBundleShortVersionString</key>
     <string>0.3</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>13</string>
+
+    <!-- Legacy SpringBoard live-icon probe. Older iOS releases used this
+         private key to select a custom SBApplicationIcon subclass. Modern
+         SpringBoardHome appears to hard-code Clock/Calendar bundle IDs, but
+         this build tests whether iPadOS 27 still honors the key elsewhere. -->
+    <key>SBIconClass</key>
+    <string>SBHClockApplicationIcon</string>
 
     <key>CFBundleIconFiles</key>
     <array>
