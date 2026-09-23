@@ -1,8 +1,10 @@
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
 
-static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
+static NSString * const SpringBoardHomePath =
+    @"/System/Library/PrivateFrameworks/SpringBoardHome.framework/SpringBoardHome";
 
 @interface LiveIconLabAppDelegate : UIResponder <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow *window;
@@ -10,7 +12,7 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
 
 @interface LiveIconLabViewController : UIViewController
 @property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic) NSInteger nextFrame;
+@property (nonatomic, strong) UIView *previewHost;
 @end
 
 @implementation LiveIconLabViewController
@@ -21,203 +23,204 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
     });
 }
 
-- (NSDictionary *)ipadIconsDictionary {
-    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
-    NSDictionary *icons = info[@"CFBundleIcons~ipad"];
-    return [icons isKindOfClass:[NSDictionary class]] ? icons : nil;
+- (NSString *)yesNo:(BOOL)value {
+    return value ? @"YES" : @"NO";
 }
 
-- (id)iconServiceProxyWithErrorHandler:(void (^)(NSError *error))errorHandler {
-    dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices",
-           RTLD_NOW | RTLD_LOCAL);
+- (void)runRuntimeProbe {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
 
-    Class serviceClass = NSClassFromString(@"_LSDIconService");
-    SEL proxySelector = NSSelectorFromString(@"XPCProxyWithErrorHandler:");
+    dlerror();
+    void *handle = dlopen(SpringBoardHomePath.UTF8String, RTLD_NOW | RTLD_LOCAL);
+    const char *error = dlerror();
 
-    if (serviceClass == Nil || ![serviceClass respondsToSelector:proxySelector]) {
-        return nil;
-    }
+    [lines addObject:[NSString stringWithFormat:
+        @"dlopen SpringBoardHome: %@",
+        handle ? @"SUCCESS" : @"FAILED"]];
 
-    return ((id (*)(id, SEL, id))objc_msgSend)(
-        serviceClass,
-        proxySelector,
-        errorHandler
-    );
-}
-
-- (void)testDirectLSDPath {
-    NSDictionary *iconsDictionary = [self ipadIconsDictionary];
-    if (!iconsDictionary) {
-        [self setStatus:@"FAILED: CFBundleIcons~ipad dictionary missing."];
+    if (!handle) {
+        [lines addObject:[NSString stringWithFormat:
+            @"dlerror: %s",
+            error ?: "(none)"]];
+        [self setStatus:[lines componentsJoinedByString:@"\n"]];
         return;
     }
 
-    NSString *iconName = [NSString stringWithFormat:@"ClockFrame%02ld",
-                          (long)self.nextFrame];
-    self.nextFrame = (self.nextFrame + 1) % 12;
+    NSArray<NSString *> *names = @[
+        @"SBLiveIconImageView",
+        @"SBHClockApplicationIconImageView",
+        @"SBHClockApplicationIcon",
+        @"SBHApplicationIcon",
+        @"SBHIconModel"
+    ];
 
-    __weak typeof(self) weakSelf = self;
-    id proxy = [self iconServiceProxyWithErrorHandler:^(NSError *error) {
-        [weakSelf setStatus:[NSString stringWithFormat:
-            @"XPC proxy error:\n%@",
-            error ?: @"unknown error"]];
-    }];
+    NSMutableDictionary<NSString *, id> *classes = [NSMutableDictionary dictionary];
 
-    if (!proxy) {
-        [self setStatus:@"FAILED: _LSDIconService XPC proxy unavailable."];
-        return;
-    }
-
-    SEL selector =
-        NSSelectorFromString(@"setAlternateIconName:forIdentifier:iconsDictionary:reply:");
-
-    if (![proxy respondsToSelector:selector]) {
-        [self setStatus:@"FAILED: direct LSD icon selector unavailable on this build."];
-        return;
-    }
-
-    [self setStatus:[NSString stringWithFormat:
-        @"Calling direct _LSDIconService once: %@\n"
-         "This bypasses UIApplication/LSApplicationProxy. Watch for a SYSTEM alert.",
-        iconName]];
-
-    void (^reply)(BOOL, NSError *) = ^(BOOL success, NSError *error) {
-        if (!success || error) {
-            [weakSelf setStatus:[NSString stringWithFormat:
-                @"Direct LSD call failed.\nSuccess: %@\nError: %@",
-                success ? @"YES" : @"NO",
-                error ?: @"(none)"]];
-        } else {
-            [weakSelf setStatus:[NSString stringWithFormat:
-                @"SUCCESS: %@ changed via direct LSD service.\n"
-                 "If no SYSTEM alert appeared, we found the real no-alert path.",
-                iconName]];
+    for (NSString *name in names) {
+        Class cls = NSClassFromString(name);
+        if (cls) {
+            classes[name] = cls;
         }
-    };
+        [lines addObject:[NSString stringWithFormat:
+            @"%@: %@",
+            name,
+            cls ? @"FOUND" : @"NOT FOUND"]];
+    }
 
-    ((void (*)(id, SEL, NSString *, NSString *, NSDictionary *, id))objc_msgSend)(
-        proxy,
-        selector,
-        iconName,
-        LiveIconLabBundleID,
-        iconsDictionary,
-        reply
-    );
-}
-
-- (void)resetDirectLSDPath {
-    NSDictionary *iconsDictionary = [self ipadIconsDictionary];
-    if (!iconsDictionary) {
-        [self setStatus:@"FAILED: CFBundleIcons~ipad dictionary missing."];
+    Class clockViewClass = classes[@"SBHClockApplicationIconImageView"];
+    if (!clockViewClass) {
+        [lines addObject:@"Clock live-image class is not visible in this process."];
+        [self setStatus:[lines componentsJoinedByString:@"\n"]];
         return;
     }
 
-    __weak typeof(self) weakSelf = self;
-    id proxy = [self iconServiceProxyWithErrorHandler:^(NSError *error) {
-        [weakSelf setStatus:[NSString stringWithFormat:@"XPC proxy error: %@", error]];
-    }];
+    BOOL isUIViewSubclass = [clockViewClass isSubclassOfClass:[UIView class]];
+    [lines addObject:[NSString stringWithFormat:
+        @"Clock image view is UIView subclass: %@",
+        [self yesNo:isUIViewSubclass]]];
 
-    SEL selector =
-        NSSelectorFromString(@"setAlternateIconName:forIdentifier:iconsDictionary:reply:");
-
-    if (!proxy || ![proxy respondsToSelector:selector]) {
-        [self setStatus:@"Direct LSD path unavailable."];
+    if (!isUIViewSubclass) {
+        [self setStatus:[lines componentsJoinedByString:@"\n"]];
         return;
     }
 
-    void (^reply)(BOOL, NSError *) = ^(BOOL success, NSError *error) {
-        [weakSelf setStatus:[NSString stringWithFormat:
-            @"Reset result: %@%@",
-            success ? @"SUCCESS" : @"FAILED",
-            error ? [NSString stringWithFormat:@"\n%@", error] : @""]];
-    };
+    @try {
+        CGRect frame = CGRectMake(0, 0, 180, 180);
+        id instance = nil;
 
-    ((void (*)(id, SEL, NSString *, NSString *, NSDictionary *, id))objc_msgSend)(
-        proxy,
-        selector,
-        nil,
-        LiveIconLabBundleID,
-        iconsDictionary,
-        reply
-    );
+        SEL initWithFrame = @selector(initWithFrame:);
+        if ([clockViewClass instancesRespondToSelector:initWithFrame]) {
+            id allocated = ((id (*)(id, SEL))objc_msgSend)(clockViewClass, @selector(alloc));
+            instance = ((id (*)(id, SEL, CGRect))objc_msgSend)(
+                allocated, initWithFrame, frame);
+            [lines addObject:@"initWithFrame: returned an object."];
+        } else {
+            id allocated = ((id (*)(id, SEL))objc_msgSend)(clockViewClass, @selector(alloc));
+            instance = ((id (*)(id, SEL))objc_msgSend)(allocated, @selector(init));
+            [lines addObject:@"init returned an object."];
+        }
+
+        if (!instance) {
+            [lines addObject:@"Instantiation returned nil."];
+            [self setStatus:[lines componentsJoinedByString:@"\n"]];
+            return;
+        }
+
+        UIView *clockView = (UIView *)instance;
+        clockView.frame = frame;
+        clockView.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [self.previewHost.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
+        [self.previewHost addSubview:clockView];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [clockView.centerXAnchor constraintEqualToAnchor:self.previewHost.centerXAnchor],
+            [clockView.centerYAnchor constraintEqualToAnchor:self.previewHost.centerYAnchor],
+            [clockView.widthAnchor constraintEqualToConstant:180.0],
+            [clockView.heightAnchor constraintEqualToConstant:180.0]
+        ]];
+
+        SEL pausedSelector = NSSelectorFromString(@"setPaused:");
+        if ([clockView respondsToSelector:pausedSelector]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(clockView, pausedSelector, NO);
+            [lines addObject:@"setPaused:NO sent."];
+        } else {
+            [lines addObject:@"setPaused: not available."];
+        }
+
+        SEL updateSelector = NSSelectorFromString(@"updateOngoingAnimationState");
+        if ([clockView respondsToSelector:updateSelector]) {
+            ((void (*)(id, SEL))objc_msgSend)(clockView, updateSelector);
+            [lines addObject:@"updateOngoingAnimationState sent."];
+        }
+
+        SEL allowedSelector = NSSelectorFromString(@"areOngoingAnimationsAllowed");
+        if ([clockView respondsToSelector:allowedSelector]) {
+            BOOL allowed =
+                ((BOOL (*)(id, SEL))objc_msgSend)(clockView, allowedSelector);
+            [lines addObject:[NSString stringWithFormat:
+                @"areOngoingAnimationsAllowed: %@",
+                [self yesNo:allowed]]];
+        }
+
+        [lines addObject:@"Live clock image-view instance was attached below."];
+    }
+    @catch (NSException *exception) {
+        [lines addObject:[NSString stringWithFormat:
+            @"EXCEPTION creating live view: %@ — %@",
+            exception.name,
+            exception.reason ?: @"(no reason)"]];
+    }
+
+    [self setStatus:[lines componentsJoinedByString:@"\n"]];
 }
 
-- (UIButton *)buttonWithTitle:(NSString *)title action:(SEL)action filled:(BOOL)filled {
+- (UIButton *)probeButton {
     UIButtonConfiguration *configuration =
-        filled ? [UIButtonConfiguration filledButtonConfiguration]
-               : [UIButtonConfiguration borderedButtonConfiguration];
-    configuration.title = title;
+        [UIButtonConfiguration filledButtonConfiguration];
+    configuration.title = @"Run SpringBoardHome runtime probe";
     configuration.cornerStyle = UIButtonConfigurationCornerStyleLarge;
 
-    UIButton *button = [UIButton buttonWithConfiguration:configuration primaryAction:nil];
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    UIButton *button =
+        [UIButton buttonWithConfiguration:configuration primaryAction:nil];
+    [button addTarget:self
+               action:@selector(runRuntimeProbe)
+     forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.nextFrame = 2;
     self.view.backgroundColor = UIColor.systemBackgroundColor;
 
     UILabel *title = [[UILabel alloc] init];
     title.text = @"LiveIconLab";
-    title.font = [UIFont systemFontOfSize:34.0 weight:UIFontWeightBold];
+    title.font = [UIFont systemFontOfSize:34 weight:UIFontWeightBold];
     title.textAlignment = NSTextAlignmentCenter;
 
     UILabel *detail = [[UILabel alloc] init];
-    detail.text = [NSString stringWithFormat:
-        @"iPadOS 27 direct LaunchServices XPC probe\nBundle ID: %@\n\n"
-         "This build does NOT call UIApplication.setAlternateIconName and does NOT "
-         "call LSApplicationProxy. It talks directly to _LSDIconService using the "
-         "generic setAlternateIconName:forIdentifier:iconsDictionary:reply: route.",
-         LiveIconLabBundleID];
-    detail.font = [UIFont systemFontOfSize:17.0];
+    detail.text =
+        @"iPadOS 27 SpringBoardHome runtime probe\n\n"
+         "This build does not change the Home Screen icon. It tests whether a normal "
+         "third-party process can load SpringBoardHome.framework, resolve Apple's "
+         "live-clock classes, instantiate SBHClockApplicationIconImageView, and "
+         "run its animation machinery.";
+    detail.font = [UIFont systemFontOfSize:16];
     detail.numberOfLines = 0;
     detail.textAlignment = NSTextAlignmentCenter;
     detail.textColor = UIColor.secondaryLabelColor;
 
     self.statusLabel = [[UILabel alloc] init];
-    self.statusLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
+    self.statusLabel.font =
+        [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightMedium];
     self.statusLabel.numberOfLines = 0;
-    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.textAlignment = NSTextAlignmentLeft;
+    self.statusLabel.text = @"Ready. Tap the probe button.";
 
-    dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices",
-           RTLD_NOW | RTLD_LOCAL);
-    Class serviceClass = NSClassFromString(@"_LSDIconService");
-    SEL proxySelector = NSSelectorFromString(@"XPCProxyWithErrorHandler:");
-    self.statusLabel.text =
-        (serviceClass && [serviceClass respondsToSelector:proxySelector])
-        ? @"_LSDIconService FOUND. Ready for one direct XPC test."
-        : @"_LSDIconService direct proxy route NOT FOUND.";
+    self.previewHost = [[UIView alloc] init];
+    self.previewHost.translatesAutoresizingMaskIntoConstraints = NO;
+    self.previewHost.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    self.previewHost.layer.cornerRadius = 24;
 
-    UIButton *test = [self buttonWithTitle:@"Test direct no-alert LSD change"
-                                    action:@selector(testDirectLSDPath)
-                                    filled:YES];
-
-    UIButton *reset = [self buttonWithTitle:@"Reset through direct LSD"
-                                     action:@selector(resetDirectLSDPath)
-                                     filled:NO];
-
-    UIStackView *buttons =
-        [[UIStackView alloc] initWithArrangedSubviews:@[test, reset]];
-    buttons.axis = UILayoutConstraintAxisVertical;
-    buttons.spacing = 12.0;
+    UIButton *button = [self probeButton];
 
     UIStackView *stack =
         [[UIStackView alloc] initWithArrangedSubviews:
-            @[title, detail, self.statusLabel, buttons]];
+            @[title, detail, button, self.statusLabel, self.previewHost]];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 24.0;
+    stack.spacing = 20;
 
     [self.view addSubview:stack];
+
+    [self.previewHost.heightAnchor constraintEqualToConstant:220].active = YES;
 
     [NSLayoutConstraint activateConstraints:@[
         [stack.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [stack.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:40],
-        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-40],
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:48],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-48],
         [stack.widthAnchor constraintLessThanOrEqualToConstant:760]
     ]];
 }
@@ -241,7 +244,7 @@ static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
 
 int main(int argc, char * argv[]) {
     @autoreleasepool {
-        return UIApplicationMain(argc, argv, nil,
-                                 NSStringFromClass([LiveIconLabAppDelegate class]));
+        return UIApplicationMain(
+            argc, argv, nil, NSStringFromClass([LiveIconLabAppDelegate class]));
     }
 }
