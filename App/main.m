@@ -4,6 +4,49 @@
 
 static NSString * const LiveIconLabBundleID = @"com.goldcreative.liveiconlab";
 static NSString * const LiveIconLabStatusNotification = @"LiveIconLabStatusNotification";
+static BOOL LiveIconLabSuppressIconAlerts = NO;
+
+@interface UIViewController (LiveIconLabAlertSuppression)
+- (void)liveiconlab_presentViewController:(UIViewController *)viewController
+                                 animated:(BOOL)animated
+                               completion:(void (^)(void))completion;
+@end
+
+@implementation UIViewController (LiveIconLabAlertSuppression)
+
+- (void)liveiconlab_presentViewController:(UIViewController *)viewController
+                                 animated:(BOOL)animated
+                               completion:(void (^)(void))completion {
+    if (LiveIconLabSuppressIconAlerts &&
+        [viewController isKindOfClass:[UIAlertController class]]) {
+        NSLog(@"[LiveIconLab] Suppressed UIAlertController during icon animation: %@",
+              viewController);
+        if (completion) {
+            completion();
+        }
+        return;
+    }
+
+    [self liveiconlab_presentViewController:viewController
+                                   animated:animated
+                                 completion:completion];
+}
+
+@end
+
+static void LiveIconLabInstallAlertSuppressionHook(void) {
+    Class cls = [UIViewController class];
+    SEL originalSelector = @selector(presentViewController:animated:completion:);
+    SEL replacementSelector = @selector(liveiconlab_presentViewController:animated:completion:);
+
+    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
+    Method replacementMethod = class_getInstanceMethod(cls, replacementSelector);
+
+    if (originalMethod && replacementMethod) {
+        method_exchangeImplementations(originalMethod, replacementMethod);
+        NSLog(@"[LiveIconLab] Installed scoped UIAlertController suppression hook");
+    }
+}
 
 @interface LiveIconAnimator : NSObject
 @property (nonatomic, strong) id applicationProxy;
@@ -79,6 +122,8 @@ static NSString * const LiveIconLabStatusNotification = @"LiveIconLabStatusNotif
 }
 
 - (void)finish {
+    LiveIconLabSuppressIconAlerts = NO;
+
     [self.timer invalidate];
     self.timer = nil;
 
@@ -117,6 +162,7 @@ static NSString * const LiveIconLabStatusNotification = @"LiveIconLabStatusNotif
     self.application = application;
     self.frame = 0;
     self.ticksRemaining = 72; // 12 seconds at 6 fps.
+    LiveIconLabSuppressIconAlerts = YES;
 
     __weak typeof(self) weakSelf = self;
     self.backgroundTask =
@@ -139,9 +185,17 @@ static NSString * const LiveIconLabStatusNotification = @"LiveIconLabStatusNotif
 }
 
 - (void)resetToPrimaryIcon {
+    LiveIconLabSuppressIconAlerts = YES;
+
     [self.timer invalidate];
     self.timer = nil;
     [self setAlternateIconName:nil];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        LiveIconLabSuppressIconAlerts = NO;
+    });
+
     [self postStatus:@"Requested primary icon."];
 }
 
@@ -312,6 +366,7 @@ static NSString * const LiveIconLabStatusNotification = @"LiveIconLabStatusNotif
 
 int main(int argc, char * argv[]) {
     @autoreleasepool {
+        LiveIconLabInstallAlertSuppressionHook();
         return UIApplicationMain(argc,
                                  argv,
                                  nil,
