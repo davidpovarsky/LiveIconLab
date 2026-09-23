@@ -1,0 +1,37 @@
+name: Build iPadOS 27 PoC
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build unsigned app and hook
+        run: |
+          chmod +x Scripts/build.sh
+          Scripts/build.sh
+
+      - name: Inspect IPA
+        run: |
+          unzip -l build/LiveIconLab-unsigned.ipa
+          plutil -p build/Payload/LiveIconLab.app/Info.plist
+          file build/Payload/LiveIconLab.app/LiveIconLab
+          file build/LiveIconHook.dylib
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveIconLab-iPadOS27-PoC
+          path: |
+            build/LiveIconLab-unsigned.ipa
+            build/LiveIconHook.dylib
+            build/build-manifest.txt
+          if-no-files-found: error
