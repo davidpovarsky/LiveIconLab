@@ -45,6 +45,14 @@ do
   test -s "$APP/$icon"
 done
 
+alternate_count="$(find "$APP" -maxdepth 1 -type f -name 'ClockFrame*.png' | wc -l | tr -d ' ')"
+if [ "$alternate_count" != "72" ]; then
+  echo "Expected 72 alternate icon PNGs, found $alternate_count" >&2
+  exit 1
+fi
+
+plutil -lint "$APP/Info.plist"
+plutil -extract 'CFBundleIcons~ipad.CFBundleAlternateIcons' xml1 -o - "$APP/Info.plist" >/dev/null
 plutil -convert binary1 "$APP/Info.plist"
 
 "$CLANGXX" \
@@ -72,8 +80,11 @@ plutil -convert binary1 "$APP/Info.plist"
   echo "App binary:"
   file "$APP/LiveIconLab"
   echo
-  echo "Bundled icons:"
+  echo "Primary icons:"
   ls -lh "$APP"/Icon*.png
+  echo
+  echo "Alternate clock frames:"
+  echo "$alternate_count PNG files across 12 alternate icons"
   echo
   echo "Hook binary:"
   file "$HOOK"
