@@ -290,3 +290,141 @@ jobs:
             build/springboard-test/launchctl-springboard.txt
             build/springboard-test/LiveIconHook-Simulator.dylib
           if-no-files-found: warn
+
+
+  masquerade-metadata-test:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build simulator app with SBIconMasqueradeIdentifier
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            arm64) TARGET="arm64-apple-ios17.0-simulator" ;;
+            x86_64) TARGET="x86_64-apple-ios17.0-simulator" ;;
+            *) echo "Unsupported runner arch: $ARCH"; exit 1 ;;
+          esac
+
+          rm -rf build/masquerade-test
+          mkdir -p build/masquerade-test/LiveIconLab.app
+
+          xcrun --sdk iphonesimulator clang \
+            -fobjc-arc \
+            -fmodules \
+            -target "$TARGET" \
+            -isysroot "$SDK" \
+            -framework Foundation \
+            -framework UIKit \
+            App/main.m \
+            -o build/masquerade-test/LiveIconLab.app/LiveIconLab
+
+          cp App/Info.plist build/masquerade-test/LiveIconLab.app/Info.plist
+
+          /usr/libexec/PlistBuddy \
+            -c "Delete :SBIconClass" \
+            build/masquerade-test/LiveIconLab.app/Info.plist || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Delete :SBIconMasqueradeIdentifier" \
+            build/masquerade-test/LiveIconLab.app/Info.plist || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Add :SBIconMasqueradeIdentifier string com.apple.mobiletimer" \
+            build/masquerade-test/LiveIconLab.app/Info.plist
+
+          python3 Scripts/generate_icons.py build/masquerade-test/LiveIconLab.app
+          plutil -lint build/masquerade-test/LiveIconLab.app/Info.plist
+          plutil -p build/masquerade-test/LiveIconLab.app/Info.plist | \
+            tee build/masquerade-test/info-plist.txt
+
+      - name: Boot iPad simulator
+        id: sim
+        run: |
+          set -euxo pipefail
+          DEVICE="$(xcrun simctl list devices available | awk '
+            /^[[:space:]]*iPad/ {
+              if (match($0, /[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}/)) {
+                last=substr($0, RSTART, RLENGTH)
+              }
+            }
+            END { if (last) print last }
+          ')"
+          test -n "$DEVICE"
+          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
+
+          xcrun simctl boot "$DEVICE" || true
+          open -a Simulator --args -CurrentDeviceUDID "$DEVICE"
+          xcrun simctl bootstatus "$DEVICE" -b
+
+      - name: Install masquerade app without SpringBoard injection
+        run: |
+          set -euxo pipefail
+          DEVICE="${{ steps.sim.outputs.device }}"
+
+          xcrun simctl uninstall "$DEVICE" com.goldcreative.liveiconlab || true
+          sleep 2
+          xcrun simctl install "$DEVICE" build/masquerade-test/LiveIconLab.app
+          sleep 10
+
+          xcrun simctl spawn "$DEVICE" log show \
+            --style compact --last 2m \
+            --predicate 'eventMessage CONTAINS "com.goldcreative.liveiconlab"' \
+            > build/masquerade-test/install.log 2>&1 || true
+
+          cat build/masquerade-test/install.log
+
+      - name: Capture two Home Screen frames
+        run: |
+          set -euxo pipefail
+          DEVICE="${{ steps.sim.outputs.device }}"
+
+          xcrun simctl ui "$DEVICE" home || true
+          sleep 4
+          xcrun simctl io "$DEVICE" screenshot build/masquerade-test/home-1.png
+          sleep 4
+          xcrun simctl io "$DEVICE" screenshot build/masquerade-test/home-2.png
+
+          shasum -a 256 \
+            build/masquerade-test/home-1.png \
+            build/masquerade-test/home-2.png \
+            | tee build/masquerade-test/hashes.txt
+
+          if cmp -s build/masquerade-test/home-1.png build/masquerade-test/home-2.png; then
+            echo "IDENTICAL" | tee build/masquerade-test/frame-comparison.txt
+          else
+            echo "DIFFERENT" | tee build/masquerade-test/frame-comparison.txt
+          fi
+
+      - name: Inspect SpringBoard icon class evidence
+        run: |
+          set -euxo pipefail
+          LOG=build/masquerade-test/install.log
+
+          grep -E 'SBHClockApplicationIcon|SBHApplicationIcon|SBApplicationIcon|LiveIconLab|com.goldcreative.liveiconlab' "$LOG" \
+            | tee build/masquerade-test/icon-evidence.txt || true
+
+          if grep -q 'SBHClockApplicationIcon' "$LOG"; then
+            echo "MASQUERADE_RESULT=CLOCK_CLASS" | tee build/masquerade-test/result.txt
+          else
+            echo "MASQUERADE_RESULT=NO_CLOCK_CLASS_EVIDENCE" | tee build/masquerade-test/result.txt
+          fi
+
+      - name: Upload masquerade metadata test
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveIconLab-Masquerade-Metadata-Test
+          path: |
+            build/masquerade-test/home-1.png
+            build/masquerade-test/home-2.png
+            build/masquerade-test/hashes.txt
+            build/masquerade-test/frame-comparison.txt
+            build/masquerade-test/info-plist.txt
+            build/masquerade-test/install.log
+            build/masquerade-test/icon-evidence.txt
+            build/masquerade-test/result.txt
+          if-no-files-found: warn
