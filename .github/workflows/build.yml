@@ -91,3 +91,150 @@ jobs:
           name: LiveIconLab-SimulatorProbe
           path: build/simulator-probe.log
           if-no-files-found: ignore
+
+
+  springboard-live-icon-test:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build simulator app and SpringBoard hook
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            arm64) TARGET="arm64-apple-ios17.0-simulator" ;;
+            x86_64) TARGET="x86_64-apple-ios17.0-simulator" ;;
+            *) echo "Unsupported runner arch: $ARCH"; exit 1 ;;
+          esac
+
+          rm -rf build/springboard-test
+          mkdir -p build/springboard-test/LiveIconLab.app
+
+          xcrun --sdk iphonesimulator clang \
+            -fobjc-arc \
+            -fmodules \
+            -target "$TARGET" \
+            -isysroot "$SDK" \
+            -framework Foundation \
+            -framework UIKit \
+            App/main.m \
+            -o build/springboard-test/LiveIconLab.app/LiveIconLab
+
+          cp App/Info.plist build/springboard-test/LiveIconLab.app/Info.plist
+          python3 Scripts/generate_icons.py build/springboard-test/LiveIconLab.app
+          plutil -convert binary1 build/springboard-test/LiveIconLab.app/Info.plist
+
+          xcrun --sdk iphonesimulator clang++ \
+            -fobjc-arc \
+            -fmodules \
+            -target "$TARGET" \
+            -isysroot "$SDK" \
+            -dynamiclib \
+            -framework Foundation \
+            SpringBoard/LiveIconHook.mm \
+            -Wl,-install_name,@rpath/LiveIconHook-Simulator.dylib \
+            -o build/springboard-test/LiveIconHook-Simulator.dylib
+
+          file build/springboard-test/LiveIconLab.app/LiveIconLab
+          file build/springboard-test/LiveIconHook-Simulator.dylib
+
+      - name: Boot newest available iPad simulator
+        id: sim
+        run: |
+          set -euxo pipefail
+
+          DEVICE="$(xcrun simctl list devices available | awk '
+            /^-- iOS / { section=$0 }
+            /^[[:space:]]*iPad/ {
+              if (match($0, /[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}/)) {
+                last=substr($0, RSTART, RLENGTH)
+              }
+            }
+            END { if (last) print last }
+          ')"
+
+          test -n "$DEVICE"
+          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
+
+          xcrun simctl boot "$DEVICE" || true
+          open -a Simulator --args -CurrentDeviceUDID "$DEVICE"
+          xcrun simctl bootstatus "$DEVICE" -b
+
+          xcrun simctl install "$DEVICE" build/springboard-test/LiveIconLab.app
+          xcrun simctl listapps "$DEVICE" | grep -A8 -B2 com.goldcreative.liveiconlab || true
+
+      - name: Inject LiveIconHook into Simulator SpringBoard
+        run: |
+          set -euxo pipefail
+          DEVICE="${{ steps.sim.outputs.device }}"
+
+          APP_PATH="$(xcrun simctl get_app_container "$DEVICE" com.goldcreative.liveiconlab app)"
+          test -d "$APP_PATH"
+
+          cp build/springboard-test/LiveIconHook-Simulator.dylib "$APP_PATH/LiveIconHook-Simulator.dylib"
+          HOOK_PATH="$APP_PATH/LiveIconHook-Simulator.dylib"
+
+          echo "Installed app path: $APP_PATH"
+          echo "Hook path: $HOOK_PATH"
+
+          # Configure the next SpringBoard launch to load our simulator dylib.
+          xcrun simctl spawn "$DEVICE" launchctl debug system/com.apple.SpringBoard \
+            --environment "DYLD_INSERT_LIBRARIES=$HOOK_PATH"
+
+          # Restart SpringBoard so the debug environment takes effect.
+          xcrun simctl spawn "$DEVICE" launchctl stop com.apple.SpringBoard || true
+          sleep 8
+
+          # SpringBoard should have relaunched. Capture process state and our logs.
+          xcrun simctl spawn "$DEVICE" launchctl print system/com.apple.SpringBoard \
+            > build/springboard-test/launchctl-springboard.txt 2>&1 || true
+
+          xcrun simctl spawn "$DEVICE" log show \
+            --style compact \
+            --last 2m \
+            --predicate 'eventMessage CONTAINS "LiveIconLab"' \
+            > build/springboard-test/liveiconhook.log 2>&1 || true
+
+          cat build/springboard-test/liveiconhook.log || true
+
+      - name: Capture Home Screen
+        run: |
+          set -euxo pipefail
+          DEVICE="${{ steps.sim.outputs.device }}"
+
+          # Make sure we are on the Home Screen and give SpringBoard time to render.
+          xcrun simctl ui "$DEVICE" home || true
+          sleep 3
+
+          xcrun simctl io "$DEVICE" screenshot \
+            build/springboard-test/home-screen.png
+
+          test -s build/springboard-test/home-screen.png
+
+      - name: Assert hook loaded
+        run: |
+          set -euxo pipefail
+          LOG="build/springboard-test/liveiconhook.log"
+
+          if ! grep -q '\[LiveIconLab\]' "$LOG"; then
+            echo "LiveIconHook produced no SpringBoard log entries."
+            echo "The screenshot and launchctl dump are still uploaded for diagnosis."
+            exit 1
+          fi
+
+          grep '\[LiveIconLab\]' "$LOG"
+
+      - name: Upload SpringBoard live-icon test
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveIconLab-SpringBoard-LiveIcon-Test
+          path: |
+            build/springboard-test/home-screen.png
+            build/springboard-test/liveiconhook.log
+            build/springboard-test/launchctl-springboard.txt
+            build/springboard-test/LiveIconHook-Simulator.dylib
+          if-no-files-found: warn
