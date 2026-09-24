@@ -9,6 +9,8 @@ typedef Class (*LiveIconLabIconClassFunction)(id, SEL, NSString *);
 
 static Class LiveIconLabIconClassForApplication(id self, SEL command, NSString *bundleIdentifier) {
     if ([bundleIdentifier isEqualToString:LiveIconLabTargetBundleID]) {
+        NSLog(@"[LiveIconLab] TARGET selector invoked for %@", bundleIdentifier);
+
         Class clockIconClass = NSClassFromString(@"SBHClockApplicationIcon");
         if (clockIconClass != Nil) {
             NSLog(@"[LiveIconLab] Mapping %@ -> SBHClockApplicationIcon", bundleIdentifier);
